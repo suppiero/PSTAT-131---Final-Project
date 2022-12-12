@@ -1,0 +1,16 @@
+Link to Dataset:
+
+https://github.com/vaastav/Fantasy-Premier-League.git
+
+URL:
+
+https://github.com/vaastav/Fantasy-Premier-League
+
+Source:
+* Fantasy Premier League Dataset: 
+@misc{anand2016fantasypremierleague,
+  title = {{FPL Historical Dataset}},
+  author = {Anand, Vaastav},
+  year = {2022},
+  howpublished = {Retrieved August 2022 from \url{https://github.com/vaastav/Fantasy-Premier-League/}}
+}
