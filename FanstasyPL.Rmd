@@ -1,0 +1,840 @@
+---
+title: "Predicting Points in Fantasy Premier League"
+author: "Piero Trujillo"
+date: "UCSB Fall 2022"
+output:
+  html_document: 
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 3
+    code_folding: hide
+  prettydoc::html_pretty:
+  theme: cayman
+  highlight: github 
+  
+---
+
+```{r setup, include=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache=TRUE, results=FALSE, warning = FALSE, message = FALSE)
+```
+
+
+
+
+
+```{r, results=TRUE,fig.align="center", out.height="400 px"}
+knitr::include_graphics("/Users/pierotrujillo/Downloads/Fantasy-Premier-League.jpeg")
+```
+
+
+
+
+
+# Introduction
+
+The purpose of this project is to generate a model that will predict the true value of weekly points a player will score in Fantasy Premier League. 
+
+# Background
+
+As a longtime Fantasy Premier League manager, I have enjoyed success in the game by watching Premier League soccer games and trusting my gut to choose players. Most recently however, I have been unable to surpass my friends and reach a competitive rank. Something must change! Therefore, I am looking to build a machine learning model to give me the edge as a Fantasy Premier League manager.
+
+# What is Fantasy Premier League?
+
+[Fantasy Premier League](https://fantasy.premierleague.com/) (FPL) is a free to play online game where you manage a squad of 15 players in the English Premier League. Throughout the season, you pick players who you believe will score you the most points as you play against your friends and the world to see who is the best manager. It is the largest fantasy soccer game on the internet and has over 9 million players.
+
+To give a sense of how the game works, I have attached a picture of my most recent team and their performance below.
+
+
+```{r, results=TRUE,fig.align="center"}
+knitr::include_graphics("/Users/pierotrujillo/Downloads/team_points.jpeg")
+```
+
+
+
+
+# Why might this model be useful?
+
+Anything can happen in the world of soccer. Therefore, picking the highest scoring players every week has proven not to be an easy task. There have been countless weeks where we have all added the wrong player to our FPL teams after gut feelings, influencers, and the general consensus of the soccer world have assured us they were the right pick only to tank our rank once again. Thus, I want to use data and machine learning algorithims to cut through the noise and guide me to the top of the league.
+
+# Loading Data & Packages
+
+This project uses a csv file containing various player performance stats like their goals and assists, along with gameweek specific data that shows how well every player performed that week. There are 5941 observations and 36 columns in this dataset. It was created and uploaded by Annand Vaastav on GitHub and I was able to download it on his [repository](https://github.com/vaastav/Fantasy-Premier-League).
+
+```{r}
+library('janitor')
+library(tidyverse)
+library(here)
+library('tidyverse')
+library('tidymodels')
+library('corrplot')
+library(rpart.plot)
+library(ranger)
+library(xgboost)
+library(rpart)
+library(rpart.plot)
+```
+
+# Setting Up Training Data
+
+This project will be using 2022/23 Premier League season data that is current up to Gameweek 11. Luckily, we inherited a very clean dataset without any missing data so we can jump straight into the set up. 
+The variable `total_points` will be the focal point of our analysis as it contains the true value of points a player scored that gameweek.
+
+```{r}
+gameweek_data <- read.csv('/Users/pierotrujillo/Downloads/PSTAT 131/Project/merged_gw.csv')
+gameweek_data
+```
+ 
+
+# Data Cleaning
+
+Although our dataset is already tidy, our categorical variables need to be changed to factors before splitting up our data and creating our recipe. Factor variables are important because they allow us to use non-numeric data in statistical modeling.
+
+```{r}
+# Factor data
+gameweek_data$position = factor(gameweek_data$position)
+gameweek_data$team = factor(gameweek_data$team)
+gameweek_data$fixture = factor(gameweek_data$fixture)
+gameweek_data$kickoff_time = factor(gameweek_data$kickoff_time)
+gameweek_data$opponent_team = factor(gameweek_data$opponent_team)
+gameweek_data$round = factor(gameweek_data$round)
+gameweek_data$was_home = factor(gameweek_data$was_home)
+gameweek_data$GW = factor(gameweek_data$GW)
+```
+
+We can also run the functions `is.na()` and `colSums()` to check that there aren't any missing values in the dataset.
+
+```{r}
+colSums(is.na(gameweek_data))
+```
+
+Thankfully, our output shows that there are no missing values!
+
+
+# Splitting Up The Data
+
+We will be implementing a 75/25 percentage data split (75% training data / 25% testing data). I chose a 75/25 percentage split because I wanted a training set large enough to account for the occasional high scoring observation while still maintaining a sizable test set.
+
+Our data is stratified on `total_points` because the amount of points each player scores varies widely.
+
+I also made sure our new data splits were split accordingly by using `nrow()`, a method used to count the number of rows in a dataframe. Our training set has 4455 observations (74.98%) while our testing set has 1486 observations (25.02%).
+
+```{r}
+set.seed(2223)
+first_split <- initial_split(gameweek_data, prop = 0.75, strata = 'total_points') 
+                              
+train_data <- training(first_split)
+test_data <- testing(first_split)
+
+nrow(gameweek_data)
+nrow(train_data) # 4455 / 5941 = 0.7498 so it's split accordingly
+nrow(test_data)
+```
+
+# V-Fold Cross-Validation
+
+V-fold cross-validation is when a dataset is divided randomly into equal parts of size v. Once divided equally, a model is trained on v-1 portions of your dataset and then uses the remaining portion as a testing set to assess how well the model can predict with new data. Cross validation is also a very important way to keep your model from overfitting.
+
+I decided to run v-fold cross validation on the my models because I don't have enough data to apply to perform a three way split with training, validation and testing sets. In addition, I wanted to accommodate for the presence of categorical variables in my recipe. 
+
+I also decided against using repeats in my cross validation because it would produce an error that kept my autoplots from running.
+
+This project will be using v-fold cross validation to help with the issue of imbalanced data. Our training set will be folded into 5 folds. Likewise, we will be stratifying on our response variable, `total_points`.
+
+```{r}
+fpl_folds <- vfold_cv(train_data, v = 5, strata = total_points)
+fpl_folds
+```
+
+# Building the Recipe
+
+Now that we split our data into training and testing sets, we can create a recipe that will help us predict `total_points`, our response variable, from our most important predictors.
+
+First we have to conduct our variable selection. To do so, I used my corrplot from our EDA to find the variables most highly correlated with `total_points`. Therefore, `bps`, `bonus`, `xP`, `ict_index`, and `influence` were all added to our recipe. In addition, `selected`, `transfers_in` and `transfers_out` are variables that take into account human consideration because they depict human bias in real time. Thus, they felt like interesting predictors to add into our recipe. Direct indicators of player performance such as `assists`, `clean_sheets`, `goals_scored`, and `minutes` are also obvious variable selections. `Creativity` and `threat` also depict a holistic view of each player. In addition, `opponent_team` should in theory influence a player's `total_points` score because a player performance should be effected by playing against a really strong or fairly weak team. Lastly, `was_home` can also influence a team's performance because of the favorable fan support.
+
+Likewise, variables that have no correlation with `total_points` are cut out from our analysis. This includes non-numeric predictors that deal with the time a game was played like `fixture`, `kickoff_time`, `round`, `GW` and variables that are used to label our observations such as `element`, and `position`. Other variables that I thought could have been valid predictors but were left out are `own_goals`, `penalties_missed`, `penalties_saved`, `yellow_cards`, and `red_cards`. Their lack of influence on `total_points` is likely due to the fact that these variables record rare occasions in soccer matches.
+
+Next, we use `step_dummy` do to make a numeric category for our categorical variables so they can be used for statistical analysis. Our recipe is also centered and scaled in order to normalize all of our predictors.
+
+```{r}
+best_recipe <- recipe(formula = total_points ~ xP + assists + bonus + bps + clean_sheets + creativity + goals_scored + ict_index + influence + minutes + opponent_team + selected + threat + transfers_in + transfers_out + value + was_home, data = train_data) %>% 
+step_dummy(c('was_home', 'opponent_team')) %>%
+step_center(all_predictors()) %>% # center
+step_scale(all_predictors()) # scale
+```
+
+# Exploratory Data Analysis
+
+
+### Corrplot
+
+We start off our exploratory data analysis by creating a corrplot to visualize the relationship between our variables and our response variable, `total_points`. After observing our corrplot, it looks like `total_points` is highly positively correlated with`bps`, `xP`, and `influence`. Likewise, it is also moderately positively correlated with `bonus`, and `ict_index`. Therefore, I believe `bps`, `xP`, `influence`, `bonus`, and `ict_index` will be the best predictors for our model.
+
+```{r}
+png(file="fplcorr.png", res=300, width=4500, height=4500)
+fpl_corrplot <- train_data %>% select_if(is.numeric) %>% cor(use = "complete.obs") %>% corrplot(type = "lower", diag = FALSE)
+```
+
+```{r, results=TRUE}
+knitr::include_graphics("/Users/pierotrujillo/Downloads/PSTAT 131/Project/fplcorr.png")
+```
+
+### Point Distribution By Team
+
+This visualization was created to find which teams were worth targeting players from. In addition, it gives us a univariate view of our outcome variable, `total_points`. 
+
+We are looking for teams with a lot of observations with 4 points or more since anything under that is considered normal behavior. Every team has clusters around 0 to 2 points due to their being a lot of players who don't play, netting them a score of 0 points, and starters who play at least 60 minutes get 2 points. Some teams have observations with negative values due to players getting red carded (-2 point deduction).
+
+Our graphs show that the top performing teams yield the most favorable point distributions like Arsenal, Manchester City, Newcastle and Manchester United. This was a given but our graphs also uncovered some unlikely gems to choose players from like Fulham, an average performing team and Bournemouth and Wolves, who are both in contention for last place.
+
+```{r}
+train_data %>% 
+  ggplot(aes(total_points, GW,  color = team), show.legend = FALSE) +
+  geom_point(alpha = 0.5) +
+  stat_summary(fun.y=mean, colour="red", geom="line", size = 3) +
+    facet_wrap(~team, scales = "free") +
+  labs(
+    title = "Point Distribution By Team",
+    y = "Gameweek",
+    x = "Points Scored"
+  )  + theme(legend.position = "none") # hide legend
+```
+
+### Is `xP` an Accurate Predictor of `total_points`?
+
+Since `xP` is actually a widely accepted metric by Fantasy Premier League managers to predict a player's points, I wanted to check if it truly is an accurate predictor.
+
+Unfortunately for us managers, `xP` is not a very good predictor. I expected `xP` to be a better predictor as more gameweeks went by which would be denoted by our red median line gradually having a more linear trend as we recieved more data every week. However, our graphs did not show a strong linear pattern meaning that more data will not lead to more accurate results.
+
+
+```{r}
+train_data %>% 
+  ggplot(aes(total_points, xP,  color = GW)) +
+  geom_point(alpha = 0.5)  + stat_summary(fun.y=mean, colour="red", geom="line", size = 1) +
+    facet_wrap(~GW, scales = "free") +
+  labs(
+    title = "Can Expected Points Predict Actual Points?",
+    y = "Expected Points (xP)",
+    x = "Actual Points (total_points)"
+  )
+```
+
+
+
+# Linear Regression
+
+We kick start our analysis with a linear regression model!
+
+I set the engine to *lm* to add implementation of linear regression and set the mode to `regression` because my outcome is a numeric variable. This model was not tuned.
+
+```{r}
+# linear regression object
+lm_model <- linear_reg() %>% 
+            set_engine('lm') %>% # adds lm implementation of linear regression
+            set_mode('regression')
+# View object properties
+lm_model
+```
+Added a workflow using the recipe we built above. 
+
+```{r}
+# workflow
+lm_workflow <- workflow() %>% 
+  add_model(lm_model) %>% 
+  add_recipe(best_recipe)
+```
+
+Then, I fit the model on our training data and tidied the linear model object.
+
+```{r}
+lm_fit <- fit(lm_workflow, train_data)
+lm_fit %>% 
+  # This returns the parsnip object:
+  extract_fit_parsnip() %>% 
+  # Now tidy the linear model object:
+  tidy()
+```
+
+Now, we will be assessing the linear model's performance using the testing data. Furthermore, a visual representation of the linear model's performance was added.
+
+```{r}
+fpl_test_res <- predict(lm_fit, new_data = test_data %>% select(-total_points))
+fpl_test_res %>% 
+  head()
+fpl_test_res <- bind_cols(fpl_test_res, test_data %>% select(total_points))
+fpl_test_res %>% 
+  head()
+# metrics
+fpl_metrics <- metric_set(yardstick::rmse, yardstick::rsq, yardstick::mae)
+fpl_metrics(fpl_test_res, truth = total_points, 
+                estimate = .pred)
+# RMSE
+rmse(fpl_test_res, truth = total_points, estimate = .pred)
+
+fpl_test_res %>% 
+  ggplot(aes(x = .pred, y = total_points, color=total_points)) +
+  geom_point(alpha = 0.2) +
+  geom_abline(lty = 2, color='red') + 
+  theme_bw() +
+  coord_obs_pred()
+```
+
+Overall, our linear regression model worked very well on this dataset.
+
+Since our `rsq` (R-Squared) value is really high (0.938), this means that about 94% of variation in total_points is explained by the linear model. This is likely because the relationship between `total_points` and the predictors is linear. Likewise, the assumptions of linear correlation are met, and the variables are highly correlated with each other.
+
+Next, we take a look at our `mae` (mean absolute error). Ideally, we want a `mae` value as close to 0 as possible for the most accurate predictions. Since we have a `mae` of about 0.37, this means that the model is very accurate.
+
+In addition, we have a somewhat low `rmse` (root mean squared error) of only about 0.62. This will be a good reference point for the `rmse` values we will be attaining from the rest of our models.
+
+
+
+# Boosted Trees
+
+Next, we move on to our Boosted Trees Model.
+
+I created a workflow and set the model with a tuning parameter for our trees. I set the engine as `xgboost` and the mode as `regression` since our outcome is numeric.
+
+Then, I set up the tuning grid, and updated the parameters to adjust the number of trees to 1000, the max number of trees Professor Coburn suggested not to surpass. Likewise, I had already ran grid previously with 2000 trees and it had no effect on our model. I also added 10 levels to our tuning grid since the data isn't particularly massive so computing power isn't a big issue.
+
+Next, I executed the tuning of my model and and fit the v-fold cross validation. After, I ran our `autoplot()` to find the ideal number of trees to use in our Boosted Tree model. This process took around 50 minutes! 
+
+```{r}
+library(xgboost)
+boost_spec <- boost_tree() %>% set_engine("xgboost") %>% set_mode("regression")
+
+boost_wf <- workflow() %>% add_model(boost_spec %>% set_args(trees = tune())) %>% add_recipe(best_recipe)
+
+boost_grid <- grid_regular(trees(range = c(10,1000)), levels = 10)
+
+boost_tune_res <- tune_grid(boost_wf, resamples = fpl_folds, grid = boost_grid) 
+autoplot(boost_tune_res, ts.colour = "red")
+```
+
+It appears the biggest jump in performance comes from using around 250 trees. After that, performance plateaus until we reach our end point of 1000 trees. It eventually converges and captures all the information we need at this point. Likewise, using around 250 trees will yield the best `rsq` and `rmse` values.
+
+Next, we will look at the ROC value of the best performing boosted tree model on our folds.
+
+```{r}
+collect_metrics(boost_tune_res) %>% arrange(-mean)
+
+best_boost_final <- select_best(boost_tune_res)
+
+best_boost_final_model <- finalize_workflow(boost_wf, best_boost_final)
+
+best_boost_final_model_fit <- fit(best_boost_final_model, data = train_data)
+```
+
+Although 231 trees gives us the best `rsq` value (0.952), we should still use 10 trees for our final boosted tree model because the difference between the `rsq` value between 231 trees and 10 trees is very minimal (0.001). Meanwhile, 10 trees has a significantly higher `rmse` value than 231 trees. Overall, the number of trees doesn't matter to0 much since they all perform very similarly except for the model with 10 trees. Therefore, we can confirm that using 10 trees yields the best performance.
+
+As a side note, this must indicate that the number of predictors is the more important than the number of trees.
+
+Finally, we can use our fitted boosted tree model on our testing set to calculate performance.
+
+```{r}
+library(yardstick)
+boost_test_res <- predict(best_boost_final_model_fit, new_data = test_data %>% select(-total_points))
+boost_test_res %>% 
+  head()
+boost_test_res <- bind_cols(boost_test_res, test_data %>% select(total_points))
+boost_test_res %>% 
+  head()
+
+# metrics
+boosted_metrics <- metric_set(yardstick::rmse, yardstick::mae, yardstick::rsq)
+boosted_metrics(boost_test_res, truth = total_points, 
+                estimate = .pred)
+```
+
+Our `rsq` is really high! There is 93.99% variation in `total_points` that is explained by the boosted tree model. Since our `rsq` is once again very high, we can confirm that the relationship between `total_points` and the predictors is linear. 
+
+Since we want our `mae` value to be close to 0 for the most accurate predictions, our `mae` of about 0.247 means that our boosted tree model is extremely accurate. boosted tree models are created to reduce error by reducing bias so this model most likely owes its success to this attribute.
+
+In addition, we have a low `rmse` of only about 0.61. This is ideal because lower values of `rmse` indicate better fit. This means our boosted tree model can accurately predict our response variable, `total_points`. 
+
+This boosted tree model has performed better than our Linear Regression model. So far this is the model to beat!
+
+
+
+# Random Forest
+
+Setting up a random forest model and workflow. Tuned `mtry`, `trees`, and `min_n`, set our mode to `regression` (working with a numeric outcome) and used the engine `ranger`.
+
+```{r}
+rf_spec <- rand_forest(
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()) %>%
+  set_engine("ranger", importance = 'impurity') %>%
+  set_mode('regression')
+
+class_forest_rf <- workflow()%>%
+  add_model(rf_spec)%>%
+  add_recipe(best_recipe)
+```
+
+Hyperparameter tuning was conducted for the random forest model. 15 was selected for the maximum `mtry` range as it was slightly below the maximum number of predictors in my recipe. I also added 5 levels to my grid since computing power isn't an issue and I wanted to give an equal amount of levels to all of my models. Then, I executed the tuning of my workflow and and fit the v-fold cross validation. This process took 30 minutes to run.
+
+Since the number of predictors is more important than the number of trees in our random forest model, we will analyze performance with randomly selected predictors. Our `autoplot` shows us that our model performs best with four or more predictors since they perform very similarly after that threshold. Performance seems to taper off around 9 predictors but 15 predictors still yields the best results by a small margin since more predictors lead to more accuracy.
+
+```{r}
+forest_spec <- 
+  rand_forest(mtry = tune()) %>% 
+  set_engine("randomForest", importance = TRUE) %>%
+  set_mode("regression")
+
+forest_workflow <- workflow() %>% 
+  add_recipe(best_recipe) %>% 
+  add_model(forest_spec)
+
+penalty_grid2 <- grid_regular(mtry(range = c(2, 15)), levels = 10)
+penalty_grid2
+
+tune_res2 <- tune_grid(
+  forest_workflow,
+  resamples = fpl_folds, 
+  grid = penalty_grid2
+)
+
+tune_res2
+
+autoplot(tune_res2, ts.colour = "darkorange1")
+```
+
+Our random forest workflow was finalized by selecting the parameters from the best model by using the `select_best()` function. After, our random forest model was fit to our training data.
+
+```{r}
+best_complexity <- select_best(tune_res2, metric = "rmse")
+
+reg_tree_final <- finalize_workflow(forest_workflow, best_complexity)
+
+reg_tree_final_fit <- fit(reg_tree_final, data = train_data)
+```
+
+#### Visualizing Performance
+
+I also added a scatterplot of predictions to visualize the performance of the random forest model. The linear trend depicts a solid performance.
+
+```{r}
+prediction <- augment(reg_tree_final_fit, new_data = test_data)
+
+prediction %>%
+  ggplot(aes(total_points, .pred, color="salmon1")) +
+  geom_abline(color="royalblue1") +
+  geom_point(alpha = 0.5) + theme(legend.position = "none") # hide legend
+```
+
+
+#### Variable Importance Plot
+
+I added this visualization to find which predictors are most and least useful.
+
+Surprisingly, `assists` is by far the best predictor in determining `total_points` in our random forest model. However, this makes sense because `assists` give you three points, the second highest way to earn points in Fantasy Premier League. `bps` is also close runner-up due to the fact that only the three best performing players are eligible to receive bonus points that game. Racking up a high amount of bonus points means a player has been consistently performing well. Furthermore, I am also surprised at how close the rest of our predictors' importance scores are.
+
+```{r}
+library('vip')
+best_model_final_fit <- fit(reg_tree_final, data = train_data)
+best_model_final_fit %>% extract_fit_engine() %>% vip(aesthetics = list(fill = "seagreen3"))
+```
+
+Finally, we can assess the performance of our random forest model.
+
+```{r}
+augment(reg_tree_final_fit, new_data = test_data) %>%
+  rmse(truth = total_points, estimate = .pred)
+
+augment(reg_tree_final_fit, new_data = test_data) %>%
+  rsq(truth = total_points, estimate = .pred) 
+
+augment(reg_tree_final_fit, new_data = test_data) %>%
+  mae(truth = total_points, estimate = .pred)
+```
+
+Our `rsq` is near perfect! 95.7% of variation in `total_points` is explained by the random forest model. Amazingly it is also the highest score we have recorded so far. The reduction in error is likely due to the random forest's nature of reducing variance.
+
+Our `mae` of 0.22 is as close to 0 as we have gotten and just slighty edges the boosted tree model by 0.02 concluding that the random forest model is extremely accurate.
+
+Likewise, we have a low `rmse` of only about 0.52, which is 0.11 lower than the boosted tree model. This is ideal because lower values of `rmse` indicate a better fit. We can also confirm that our random forest model can accurately predict our response variable, `total_points`.
+
+This beats our boosted tree model. Let’s continue with random forest being the model that has performed best.
+
+
+
+# Decision Tree Model
+
+Next, we move on to our decision tree model.
+
+Typically, decision trees are saved for models dealing with categorical data but `rpart` engine lets you make a decision tree with `regression` anyway.
+
+I made sure to tune my model and fit the v-fold cross validation.
+
+After observing our `autoplot`, we can conclude that as the cost-complexity parameter increases, the `rsq` value also decreases. A quick look at our autoplot shows us that our model performs best with lower complexity since our `rsq` value is highest when given the lowest complexity value. Likewise, when the cost-complexity parameter increases, the `rmse` value increases. Since lower values of `rmse` indicate better fit, we can conclude that our model does best with lower complexity.
+
+```{r}
+# decision tree model
+tree_spec <- decision_tree() %>%
+  set_engine("rpart")
+
+class_tree_spec <- tree_spec %>%
+  set_mode("regression")%>%
+  set_args(cost_complexity = tune()) # Tune the `cost_complexity` hyperparameter
+
+# decision tree workflow
+class_tree_wf <- workflow() %>%
+  add_model(class_tree_spec)%>%
+  add_recipe(best_recipe)
+
+param_grid <- grid_regular(cost_complexity(range = c(-3, -1)), levels = 10)
+
+tune_res <- tune_grid(
+  class_tree_wf, 
+  resamples = fpl_folds, 
+  grid = param_grid
+)
+# Print results.
+autoplot(tune_res, ts.colour = 'violetred1') 
+```
+
+At the top of our decision tree, our root node uses `bps` to indicate that a player will on average score 1.4 points per week. This makes sense since our decision tree is split on a relatively high `bps` score of 21 points. Furthermore, if a player has a `bps` score around 21, it is more likely they played at 60 minutes of the game, netting them 2 points. The decision tree then uses `assists`, `bonus`, and `bps` as tertiary nodes to predict a player's points and then `clean_sheets` and `goals_scored` as fourth and fifth nodes.
+
+The splits in our decision tree show us that `bps` is by far the most important predictor of total_points because `bps` takes part in the root node, secondary nodes and even the tertiary nodes! Likewise, we can fit a variable importance plot to prove that `bps` is the most important predictor in our model.
+
+```{r}
+tree_spec <- decision_tree() %>%
+  set_engine("rpart")
+
+reg_tree_spec <- tree_spec %>%
+  set_mode("regression")
+
+reg_tree_fit <- reg_tree_spec %>%
+  fit(total_points ~ xP + assists + bonus + bps + clean_sheets + creativity + goals_scored + ict_index + influence + minutes + opponent_team + selected + threat + transfers_in + transfers_out + value + was_home, data = train_data)
+
+reg_tree_fit %>%
+  extract_fit_engine() %>%
+  rpart.plot()
+```
+This importance plot confirms that `bps` is by far the best predictor. It's importance makes sense as only the three best performing players are eligible to receive bonus points that game. Likewise, having a high amount of bonus points shows that a player has consistently put in quality performances.
+
+
+```{r}
+vip(reg_tree_fit, aesthetics = list(fill = "slateblue1"))
+```
+Unfortunately, I did not find the accuracy of my decision tree since they are not very accurate when it comes to regression. Likewise, it is not very easy to find the accuracy of a decision tree for regression. However, for sake of this project, I wanted to try out every model possible which is why I still created a decision tree visualization. Therefore, we are going to move on to other models.
+
+
+
+# Ridge Regression
+
+Here, we start out by fitting a ridge regression to the entire training set. Since `parsnip` does not have a dedicated function to create a ridge regression model specification, we will be using a `linear_reg()` model and set the `mixture` to 0 to specify a ridge model. The `glmnet` engine requires you to set a `penalty` in order to fit the model, so `penalty` is set to 0 for now. In the next section, we’ll tune it by fitting it to the folds, to select the optimal value for penalty.
+
+```{r}
+ridge_spec <- linear_reg(mixture = 0, penalty = 0) %>%
+  set_mode("regression") %>%
+  set_engine("glmnet")
+```
+
+Now that the specification is created, we can fit it to our data. We will use all the predictors in our original recipe.
+
+```{r}
+ridge_fit <- fit(ridge_spec, total_points ~ xP + assists + bonus + bps + clean_sheets + creativity + goals_scored + ict_index + influence + minutes + opponent_team + selected + threat + transfers_in + transfers_out + value + was_home, data = train_data)
+```
+
+Tidied the ridge regression fit.
+
+```{r}
+tidy(ridge_fit)
+```
+
+Next, we can visualize how the magnitude of the coefficients are being regularized towards zero as the penalty goes up.
+
+```{r}
+ridge_fit %>%
+  extract_fit_engine() %>%
+  plot(xvar = "lambda")
+```
+Then, we predict values from our fit. Since we haven't found the best value for `penalty`, it is still equal to 0.
+
+```{r}
+predict(ridge_fit, new_data = train_data)
+```
+
+Now let's perform some hyperparameter tuning on the ridge regression model to find the best value of `penalty`. The `tune_grid()` function is used to perform hyperparameter tuning by using a grid search. 
+
+Since ridge regression is is scale sensitive, I had to tweak our recipe to accommodate for this new attribute. This included using `step_zv()` and `step_novel`, and `step_normalize` in our recipe. To make sure that the variables are on the same scale, we used `step_normalize()`. Secondly, to deal with factor variables, we used `step_novel()` and `step_dummy()`. Lastly, we used `step_zv()` to remove variables that had the same value, meaning they had zero variance. After, executing the tuning of my model, I fit the v-fold cross validation. 
+
+We set `penalty` = `tune()`. Letting `tune_grid()` know that the penalty parameter should be tuned. Our `penalty_grid` will try out multiple values for `penalty` using grid_regular(), which creates a grid of evenly spaced parameter values. `penalty()` will then find the right penalty parameter and set the range of the grid we are searching for. 
+
+Our `autoplot()` shows that the amount of regularization affects the performance metrics equally. Our model performs best with a minimal amount of regularization. Then, performance starts to tank as amount of regularization approaches one. These are areas where the amount of regularization does not have any meaningful influence on the coefficient estimates.
+
+```{r}
+ridge_recipe <- 
+  recipe(formula = total_points ~ xP + assists + bonus + bps + clean_sheets + creativity + goals_scored + ict_index + influence + minutes + opponent_team + selected + threat + transfers_in + transfers_out + value + was_home, data = train_data) %>% 
+  step_novel(all_nominal_predictors()) %>% 
+  step_dummy(c('was_home', 'opponent_team')) %>% 
+  step_zv(all_predictors()) %>% 
+  step_normalize(all_predictors())
+
+ridge_spec <- 
+  linear_reg(penalty = tune(), mixture = 0) %>% 
+  set_mode("regression") %>% 
+  set_engine("glmnet")
+
+ridge_workflow <- workflow() %>% 
+  add_recipe(ridge_recipe) %>% 
+  add_model(ridge_spec)
+
+penalty_grid <- grid_regular(penalty(range = c(-5, 5)), levels = 10)
+penalty_grid
+
+tune_res <- tune_grid(
+  ridge_workflow,
+  resamples = fpl_folds, 
+  grid = penalty_grid
+)
+
+tune_res
+
+autoplot(tune_res, ts.colour = 'royalblue3')
+```
+
+Now, we can fit the model to the training set and select best value for penalty using `select_best()`. We then finalize our workflow by updating our recipe with the value of `best_penalty`.
+
+Our final model can now be applied to our testing data set to validate its performance.
+
+```{r}
+collect_metrics(tune_res)
+
+best_penalty <- select_best(tune_res, metric = "rsq")
+best_penalty
+
+ridge_final <- finalize_workflow(ridge_workflow, best_penalty)
+
+ridge_final_fit <- fit(ridge_final, data = train_data)
+
+augment(ridge_final_fit, new_data = test_data) %>%
+  rsq(truth = total_points, estimate = .pred) 
+
+augment(ridge_final_fit, new_data = test_data) %>%
+  rmse(truth = total_points, estimate = .pred) 
+
+augment(ridge_final_fit, new_data = test_data) %>%
+  mae(truth = total_points, estimate = .pred)
+```
+
+The `rsq` value for our model is really high (0.9365). This means that 93.65% of variation in `total_points` is explained by the ridge regression model. The ridge regression model's `mae` of 0.387 means that the model is very accurate. Likewise, we have a somewhat low `rmse` of 0.626 meaning that the predicted values are fairly close to the actual values.
+
+Although this is a solid model, it still does not perform better than our reigning champion, the random forest model.
+
+
+
+# Lasso Regression
+
+Similar to ridge regression above, we will use the `glmnet` package to perform lasso linear regression. The `mixture` argument specifies the amount of different types of regularization and `mixture` = 1 specifies lasso regularization. Likewise, the preprocessing needed is the same so we tweak our recipe like we did in ridge regression.
+
+```{r}
+lasso_recipe <- recipe(formula = total_points ~ xP + assists + bonus + bps + clean_sheets + creativity + goals_scored + ict_index + influence + minutes + opponent_team + selected + threat + transfers_in + transfers_out + value + was_home, data = train_data) %>% 
+  step_novel(all_nominal_predictors()) %>% 
+  step_dummy(c('was_home', 'opponent_team')) %>% 
+  step_zv(all_predictors()) %>% 
+  step_normalize(all_predictors())
+
+lasso_spec <- 
+  linear_reg(penalty = tune(), mixture = 1) %>% 
+  set_mode("regression") %>% 
+  set_engine("glmnet") 
+
+lasso_workflow <- workflow() %>% 
+  add_recipe(lasso_recipe) %>% 
+  add_model(lasso_spec)
+```
+
+We are still using the same `penalty` argument and picked the same range of values for penalty.
+
+```{r}
+penalty_grid <- grid_regular(penalty(range = c(-5, 5)), levels = 10)
+```
+
+I tuned my model and fit the v-fold cross validation. This was a short process of only 10 minutes.
+
+```{r}
+tune_res3 <- tune_grid(
+  lasso_workflow,
+  resamples = fpl_folds, 
+  grid = penalty_grid
+)
+
+autoplot(tune_res3, ts.colour = 'palegreen')
+```
+
+
+Our lasso regression model performs best with a minimal of regularization and performs best as it approaches 0.001. After, the model really starts to nosedive in performance.
+
+With that in mind, we select the best value for penalty.
+
+```{r}
+best_penalty <- select_best(tune_res3, metric = "rsq")
+```
+
+Then refit using the training data set.
+
+```{r}
+lasso_final <- finalize_workflow(lasso_workflow, best_penalty)
+
+lasso_final_fit <- fit(lasso_final, data = train_data)
+```
+
+And finally, predict on the testing set.
+
+```{r}
+augment(lasso_final_fit, new_data = test_data) %>%
+  rsq(truth = total_points, estimate = .pred)
+
+augment(lasso_final_fit, new_data = test_data) %>%
+  rmse(truth = total_points, estimate = .pred)
+
+augment(lasso_final_fit, new_data = test_data) %>%
+  mae(truth = total_points, estimate = .pred)
+```
+
+Our lasso regression model has a high `rsq` of 0.938. This means that 93.8% of variation in `total_points` is explained by the Lasso Regression model. Likewise our lasso regression model is very accurate due to its `mae` value of 0.369. Likewise, we have a somewhat low `rmse` of about 0.62. Overall, this is not our best model but it still gave a good performance and slightly outperformed it's compatriot, ridge regression.
+
+
+# Ranking Model Performance
+
+
+Now, the moment we've all been waiting for!
+
+
+The rankings are: 
+
+1. Random Forest Model
+
+2. Boosted Trees Model
+
+3. Lasso Regression Model
+
+4. Linear Regression Model 
+
+5. Ridge Regression Model 
+
+6. Decision Tree Model (disqualified due to lack of accuracy)
+
+The random forest model produces the lowest `mae` and `rmse` values while maintaining our highest `rsq` value. Therefore, we can conclude that the random forest model has performed the best out of all of our models and is the best model for our dataset.
+
+Let’s continue with the **Random Forest Model** being the model that performed best.
+
+```{r, results=TRUE}
+knitr::include_graphics("/Users/pierotrujillo/Downloads/kirbytree.png")
+```
+**Hooray for trees!!**
+
+
+# Final Model Building
+
+### Loading Raw Dataset
+
+I decided to choose Gameweek 11 from the 2021/2022 season as my dataset because I wanted to test the performance of my model on last season's data. I specifically chose Gameweek 11 due to our orginal analysis only having 11 gameweeks of data to learn from. Another important factor was that games started to be postponed due to a surge of Covid-19 cases in the league starting in December 12 (Gameweek 16). This meant that not every team would play during a gameweek or that some teams would play twice in a gameweek once Gameweek 16 started. Leading to some strange `total_points` values as some players either earned 0 points or had the opportunity to double their `total_points` tallies. I feared conducting my analysis on such a gameweek data would heavily skew our data and tamper with our results.
+
+```{r}
+best_model_data <- read.csv('/Users/pierotrujillo/Downloads/PSTAT 131/Project/merged_gw2122.csv')
+```
+
+### Data Cleaning For Final Model Building
+
+Our categorical variables need to be changed to factors before splitting up our data and creating our recipe.
+
+```{r}
+best_model_data$position = factor(best_model_data$position)
+best_model_data$team = factor(best_model_data$team)
+best_model_data$fixture = factor(best_model_data$fixture)
+best_model_data$kickoff_time = factor(best_model_data$kickoff_time)
+best_model_data$opponent_team = factor(best_model_data$opponent_team)
+best_model_data$round = factor(best_model_data$round)
+best_model_data$was_home = factor(best_model_data$was_home)
+best_model_data$GW = factor(best_model_data$GW)
+```
+
+Since last season already ended, this file contains all 38 gameweeks played. Since we are only conducting our analysis up to Gameweek 11, we will remove all gameweeks after that from our dataset.
+
+```{r}
+GW11_data <- best_model_data[best_model_data$GW == 1 | best_model_data$GW == 2 | best_model_data$GW == 3 | best_model_data$GW == 4 | best_model_data$GW == 5 | best_model_data$GW == 6 | best_model_data$GW == 7 | best_model_data$GW == 8 | best_model_data$GW == 9 | best_model_data$GW == 10 | best_model_data$GW == 11,]
+```
+
+### Splitting Up The Data
+
+We will be implementing a 75/25 percentage data split (75% training data / 25% testing data). I chose a 75/25 percentage split because I wanted a training set large enough to account for the occasional high scoring observation while still maintaining a sizable test set.
+
+I also made sure our new data splits were split accordingly by using `nrow()`. Our training set has 4955 observations (74.98%) while our testing set has 1653 observations (25.02%).
+
+```{r}
+set.seed(2223)
+final_first_split <- initial_split(GW11_data, prop = 0.75, strata = 'total_points') 
+                              
+best_model_train_data <- training(final_first_split)
+best_model_test_data <- testing(final_first_split)
+
+nrow(GW11_data)
+nrow(best_model_train_data) # 4955 / 6608 = 0.7498 so it's split accordingly
+nrow(best_model_test_data)
+```
+
+### Training the Final Model
+
+To prepare, we will create a final workflow that has been tuned with the best parameters from our random forest model using the`select_best()`. 
+
+```{r}
+random_forest_wkflow_tuned <- forest_workflow %>% 
+  finalize_workflow(select_best(tune_res2, metric = "rmse"))
+```
+
+Run the fit. 
+
+```{r}
+random_forest_results <- fit(random_forest_wkflow_tuned, best_model_train_data)
+```
+
+### Testing and Analysis on Test Set
+
+Now we can fit the model to the new testing set to analyze how well our model performs!
+
+To do so, we will be using the same process as our previous models where we determine the best model with our final workflow and fit the entire training set. Then, we can evaluate the test set using the `metric_set()` function to see how well our model performed. 
+
+```{r}
+final_random_forest_test_res <- predict(random_forest_results, new_data = best_model_test_data %>% select(-total_points))
+
+final_random_forest_test_res 
+
+final_rf_test_res <- bind_cols(final_random_forest_test_res, best_model_test_data %>% select(total_points))
+final_rf_test_res %>% 
+  head()
+
+final_rf_metrics <- metric_set(yardstick::rmse, yardstick::mae, yardstick::rsq)
+final_rf_metrics(final_rf_test_res, truth = total_points, 
+                estimate = .pred)
+```
+
+We can now check our random forest's predicted values and compare them to the actual points scored (`total_points`). Just from a few observations, most predictions are fairly close or at least all of them are in the right direction. However, these predictions are still not as accurate as we would have liked. 
+
+Overall, our final model returned an `rmse` of *0.519* on our testing data. As expected, this value is higher than the training `rmse`. This is due to the fact that our test data is a set of values the model has never seen before. Therefore, it is bound to have a worse performance. 
+
+It also has an `rsq` of *0.959*, our highest ever recorded value! Furthermore, our final model returned a `mae` value of *0.22*, tying our original random forest model for the lowest recorded `mae`.
+
+The difference between the training and testing `rmse` is *0.2947*. While not extremely close, this is actually a relatively small difference which means that the model was able use our training data, generalize the model, and then make predictions after looking at new data all while still achieving a low `rmse`. 
+
+In short, this exhibits the fact that our model did a superb job at not overfitting to the training data! 
+
+
+# Conclusion
+
+After testing various models and comparing their metrics, I ultimately decided to go with the random forest model. It produced the lowest `mae` and `rmse` values while maintaining our highest `rsq` value. It most likely performed the best due to the random forest model’s nature of  learning from a diverse set of data, leading to a more stable and generalizable prediction. My random forest model was further helped by the large amount of variables allowing it to take in all this information in its splits and find the best possible way to predict points. Likewise, this feature kept the trees from making correlations between variables that are not actually correlated. My boosted tree model was a close second and performed almost equally in all areas but was not chosen because of it’s smaller `rmse` value. Likewise, I was surprised the boosted tree model was not my best model because boosting reduces bias and I thought that would lead to a superior reduction in error. I was also surprised that a basic linear regression model outperformed my ridge regression model. I was also happy I chose v-fold cross fold validation because my autoplots consistently yield relatively small `rmse` values which meant that it really balanced my data well. Furthermore, all of my models performed rather similarly in the grand scheme of things but their ranks were decided by small margins between their `rmse`, `rsq`, and `mae` values. This must mean that the relationship between `total_points` and the predictors is linear and that `total_points` isn’t very hard to predict.
+
+As far as potential improvements go, I am interested in adding a Support Vector Machines model to improve quality of my predictions. Unfortunately, I do not have the computing power for that right now. In addition, I would like to use a second dataset from Annand Vaastav’s FPL repository, `cleaned_players.csv`, which uses point tallies across every season a player has played to help validate my findings and see how a player has performed historically. I would also like to apply this model to other datasets like Fantasy Football Scout, a paid subscription dataset that looks at expected goals, assists, dribbles, and shots every 90 minutes (the length of one soccer match) along with the spatial analysis of where on the field these actions were taken. These variables would make excellent predictors and really improve the performance of our model. Furthermore, I would like to improve the quality of my visualizations by exploring more packages and also plot performance graphs of specific players I am monitoring for my team that gameweek. In the near future, I am excited to build on my model by updating it every gameweek for the rest of this season with new player data in order to help me choose the next best player to transfer into my team.
+
+Overall, the Fantasy Premier League dataset has provided an engaging way to build my experience and skills with machine learning techniques, and the successful generation of a model that can help predict player points. I look forward to honing my machine learning skills as I continue to explore the world soccer analytics.
+
+
+<center>
+
+![Thank you for reading! I hope this report and my random forest model can propel us to the top of our leagues!](https://media.giphy.com/media/UzbfkwfAvwFov1JHmr/giphy-downsized-large.gif)
+
+</center>
