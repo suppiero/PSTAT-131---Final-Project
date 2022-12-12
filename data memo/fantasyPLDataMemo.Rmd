@@ -1,0 +1,33 @@
+---
+title: "Fantasy Premier League Data Memo"
+author: "Piero Trujillo"
+date: "10/2/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Link to Dataset:
+
+https://github.com/vaastav/Fantasy-Premier-League.git
+
+## Source:
+
+@misc{anand2016fantasypremierleague,
+  title = {{FPL Historical Dataset}},
+  author = {Anand, Vaastav},
+  year = {2022},
+  howpublished = {Retrieved August 2022 from \url{https://github.com/vaastav/Fantasy-Premier-League/}}
+  
+
+## Data Memo:
+
+
+As a longtime Fantasy Premier League player, an online point based game where you build a team of 11 soccer players from the English first division, I will be analyzing a Fantasy Premier League dataset for my final project. In this machine learning project, I will be creating a point predicting algorithm to predict the top players this season and propel me to the top of my mini league. This dataset was created and uploaded by Annand Vaastav on GitHub. It contains basic stats for each player such as expected points and their goals and assists, along with gamweek specific data that shows how well every player performed that week and the season history of each player. In the comprehensive dataset that showcases a player’s current statistics, there are 441 observations, where each player is an observation and 35 predictors. Currently, but that number will continue to increase for every match that is played. The only missing data I can think of is the lack of expected goals (xG) and expected assists (xA) to predict a player’s attacking points. However, we do have Expected Points (xP) which is XG * points for a goal + XA * points for an assist. So it is not that bad because we can just use one feature to predict attacking returns. Other than that there is no missing data, unless you count the data from future gameweeks that have not been played out yet. In that case, I want to look last seasons data to test my algorithm to see if it can accurately predict who the top players would be that season and what statistics (xP, etc) are the best predictors to find the top players. I will be working with both numerical and categorical data. My numerical data consists of player statistics to determine a player’s value such as expected points, value, total points, assists, bonus points amongst other factors. My categorical data consists of a players name, their position, their team, if they played home or away, and the time their game starts that week.
+
+I am interested in predicting the points a soccer player will make the next gameweek. In this topic, I would like to see which statistic can be best used to predict points. I expect expected Points, total points, and opponent team to be the best indicators.  I am also interested in predicting clean sheet odds (possibly by seeing who their opponent is next week, and their previous scores). I’d also like to predict next week’s best team (as in the top 15 players for every position). I could do this by using last season’s data since we already know who the top performers were. Using a small sample size of the current season, I would like to predict this seasons best team since it is not over yet. I would also like to know if playing the earliest game actually impacts a player’s performance because there is a highly thought of myth that if your player plays in the first game of the week they will not score highly. I think it would be best to use regression analysis since we are looking for the total points of a player that week, a numerical variable. The goal of my model is predictive because we are trying to predict the future of a player with only the data we have from the previous week. I believe the points scored for the gameweek will be our outcome variable while xP, name of player, opponent, and total points will be our response variables.
+
+I plan on loading my dataset by the end of this week (week 3). I may dabble in some exploratory analysis this week too but I would like to have a clear outline of what questions I am trying to answer first so that may have to wait until next week (week 4). By week 6, I would have liked to have finished most of my model so that I can start analyizing my results. By week 8, my model and results must be concluded along with my visualizations. If my model does not provide enough analysis, I will also explore the other topics I was interested in. By week 9, I would like to have started writing my final project so that I can submit it early. 
+
